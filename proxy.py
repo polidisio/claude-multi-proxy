@@ -2,39 +2,70 @@
 """
 Multi-Provider Proxy for Claude Code
 Routes model requests to MiniMax or DeepSeek based on model name.
-No external dependencies - uses only stdlib http.client.
+Fixes DeepSeek thinking mode by ensuring assistant messages have thinking blocks.
 """
 
 import http.server
 import json
-import threading
-import ssl
 from urllib.parse import urlparse
+import os
 
-# Configuration
-MINIMAX_TOKEN = "YOUR_MINIMAX_TOKEN_HERE"
+MINIMAX_TOKEN = os.environ.get("MINIMAX_TOKEN", "YOUR_MINIMAX_TOKEN")
 MINIMAX_BASE_URL = "https://api.minimax.io/anthropic/v1"
 
-DEEPSEEK_TOKEN = "YOUR_DEEPSEEK_TOKEN_HERE"
+DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN", "YOUR_DEEPSEEK_TOKEN")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic/v1"
 
 SERVER_PORT = 8090
 
-# Model mappings
 MODEL_ROUTES = {
-    # MiniMax models
     "minimax-m2.7": {"provider": "minimax", "model": "MiniMax-M2.7"},
     "minimax-m2.5": {"provider": "minimax", "model": "MiniMax-M2.5"},
     "minimax-m2": {"provider": "minimax", "model": "MiniMax-M2"},
-    # DeepSeek models
     "deepseek-v4-pro": {"provider": "deepseek", "model": "deepseek-chat"},
     "deepseek-v4-flash": {"provider": "deepseek", "model": "deepseek-chat"},
     "deepseek-chat": {"provider": "deepseek", "model": "deepseek-chat"},
-    "deepseek-reasoner": {"provider": "deepseek", "model": "deepseek-reasoner"},
+    "deepseek-reasoner": {"provider": "deepseek", "model": "deepseek-chat"},
 }
 
-# Default provider when model not recognized
 DEFAULT_PROVIDER = "deepseek"
+
+
+def ensure_thinking_in_assistant_messages(messages):
+    """
+    Claude Code strips thinking blocks from assistant messages.
+    DeepSeek requires them in thinking mode.
+    Add empty thinking block to assistant messages that don't have one.
+    """
+    fixed = []
+    for msg in messages:
+        if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+            msg = dict(msg)
+            has_thinking = any(
+                isinstance(b, dict) and b.get("type") == "thinking"
+                for b in msg["content"]
+            )
+            if not has_thinking:
+                # Prepend empty thinking block
+                msg["content"] = [{"type": "thinking", "thinking": ""}] + msg["content"]
+        fixed.append(msg)
+    return fixed
+
+
+def strip_thinking_from_user_messages(messages):
+    """DeepSeek rejects thinking blocks in user messages."""
+    cleaned = []
+    for msg in messages:
+        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            msg = dict(msg)
+            msg["content"] = [
+                block for block in msg["content"]
+                if not (isinstance(block, dict) and block.get("type") == "thinking")
+            ]
+            if not msg["content"]:
+                msg["content"] = [{"type": "text", "text": "."}]
+        cleaned.append(msg)
+    return cleaned
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -51,10 +82,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error_response(400, "Invalid JSON")
             return
 
-        # Get model from request
         model = request_data.get('model', DEFAULT_PROVIDER)
         
-        # Determine target provider and transform model name
         if model in MODEL_ROUTES:
             route = MODEL_ROUTES[model]
             provider = route["provider"]
@@ -66,11 +95,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             provider = "minimax"
             target_model = "MiniMax-M2.7"
         else:
-            # Default to DeepSeek
             provider = "deepseek"
             target_model = "deepseek-chat"
 
-        # Get credentials and base URL
         if provider == "minimax":
             token = MINIMAX_TOKEN
             base_url = MINIMAX_BASE_URL
@@ -78,13 +105,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             token = DEEPSEEK_TOKEN
             base_url = DEEPSEEK_BASE_URL
 
-        # Update model in request
         request_data['model'] = target_model
 
-        # Forward request
-        self.proxy_request(base_url, token, request_data)
+        # Fix thinking mode issues for DeepSeek
+        if provider == "deepseek" and "messages" in request_data:
+            # 1. Add thinking block to assistant messages if missing
+            request_data["messages"] = ensure_thinking_in_assistant_messages(
+                request_data["messages"]
+            )
+            # 2. Remove thinking blocks from user messages
+            request_data["messages"] = strip_thinking_from_user_messages(
+                request_data["messages"]
+            )
 
-    def proxy_request(self, base_url, token, request_data):
+        self.proxy_request(base_url, token, request_data, provider)
+
+    def proxy_request(self, base_url, token, request_data, provider):
         import http.client
         
         parsed = urlparse(base_url)
@@ -116,7 +152,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/v1/models':
-            # Return available models
             models = {
                 "data": [
                     {"id": "minimax-m2.7", "display_name": "MiniMax M2.7", "type": "model"},
@@ -154,13 +189,6 @@ def run_server(port):
     print(f"📡 Available models:")
     print(f"   - minimax-m2.7, minimax-m2.5")
     print(f"   - deepseek-v4-pro, deepseek-v4-flash, deepseek-chat, deepseek-reasoner")
-    print(f"\nUsage in Claude Code:")
-    print(f"   /model minimax-m2.7    # Use MiniMax")
-    print(f"   /model deepseek-v4-pro  # Use DeepSeek")
-    print(f"\nClaude Code env vars:")
-    print(f"   ANTHROPIC_AUTH_TOKEN=<anything>")
-    print(f"   ANTHROPIC_BASE_URL=http://127.0.0.1:{port}")
-    print(f"   ANTHROPIC_MODEL=<model>")
     httpd.serve_forever()
 
 
