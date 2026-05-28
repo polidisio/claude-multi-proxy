@@ -1,0 +1,12 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "proxy-local",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8090",
+    "ANTHROPIC_MODEL": "minimax-m2.7",
+    "ANTHROPIC_SMALL_FAST_MODEL": "minimax-m2.7",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "minimax-m2.7"
+  },
+  "model": "sonnet"
+}

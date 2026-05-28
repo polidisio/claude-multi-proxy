@@ -1,48 +1,28 @@
 # Claude Multi-Provider Proxy
 
-A simple proxy that routes Claude Code requests to different LLM providers based on model name.
+A simple proxy that routes Claude Code traffic between MiniMax and DeepSeek based on model name.
 
 ## Features
 
-- **MiniMax** support (your own API token)
-- **DeepSeek** support (your own API token)
-- Switch models inside Claude Code using `/model <model-name>`
-- No external dependencies (stdlib only)
-- Works with Claude Code on Mac/Linux
+- Routes `minimax-m2.7`, `minimax-m2.5` → MiniMax API
+- Routes `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-chat`, `deepseek-reasoner` → DeepSeek API
+- Fixes DeepSeek thinking mode (injects empty thinking blocks in assistant messages)
+- Converts system messages to user messages (both providers don't support system role)
+- Removes thinking blocks from user messages
 
-## Models Available
+## Quick Start
 
-| Model Name | Provider | Description |
-|------------|----------|-------------|
-| `minimax-m2.7` | MiniMax | MiniMax M2.7 |
-| `minimax-m2.5` | MiniMax | MiniMax M2.5 |
-| `deepseek-v4-pro` | DeepSeek | DeepSeek V4 Pro |
-| `deepseek-v4-flash` | DeepSeek | DeepSeek V4 Flash |
-| `deepseek-chat` | DeepSeek | DeepSeek Chat |
-| `deepseek-reasoner` | DeepSeek | DeepSeek Reasoner |
-
-## Setup
-
-### 1. Configure your tokens
-
-Edit `proxy.py` and add your API tokens:
-
-```python
-MINIMAX_TOKEN = "your-minimax-token-here"
-DEEPSEEK_TOKEN = "your-deepseek-token-here"
-```
-
-### 2. Start the proxy
+### 1. Start the proxy
 
 ```bash
 python3 proxy.py
 ```
 
-The proxy will start on port 8090 (listening on all interfaces).
+The proxy listens on `0.0.0.0:8090` by default.
 
-### 3. Configure Claude Code
+### 2. Configure Claude Code
 
-Create or edit `~/.claude/settings.json`:
+Create `~/.claude/settings.json`:
 
 ```json
 {
@@ -59,51 +39,60 @@ Create or edit `~/.claude/settings.json`:
 }
 ```
 
-### 4. Use in Claude Code
+### 3. Set API tokens
 
 ```bash
-claude
+export MINIMAX_TOKEN="your-minimax-token"
+export DEEPSEEK_TOKEN="your-deepseek-token"
 ```
 
-Inside Claude Code, switch models:
+Or edit the tokens directly in `proxy.py` (not recommended for sharing).
+
+## Available Models
+
+| Model | Provider |
+|-------|----------|
+| minimax-m2.7 | MiniMax |
+| minimax-m2.5 | MiniMax |
+| deepseek-v4-pro | DeepSeek |
+| deepseek-v4-flash | DeepSeek |
+| deepseek-chat | DeepSeek |
+| deepseek-reasoner | DeepSeek |
+
+## Claude Code Commands
 
 ```
-/model minimax-m2.7    # Use MiniMax
-/model deepseek-v4-pro # Use DeepSeek
-/model deepseek-v4-flash
+/model minimax-m2.7   # Use MiniMax
+/model deepseek-v4-pro  # Use DeepSeek V4 Pro
 ```
 
-## Remote Access
+## Troubleshooting
 
-If you want to access the proxy from another machine (e.g., a remote Mac), change the proxy URL:
+### "invalid message role: system"
+- The proxy converts system messages to user messages automatically.
 
-On the remote machine, set `ANTHROPIC_BASE_URL` to the IP of the machine running the proxy, e.g.:
+### "thinking blocks must be passed back"
+- The proxy injects empty thinking blocks in assistant messages for DeepSeek.
+
+### Proxy not responding
+- Check the proxy is running: `curl http://127.0.0.1:8090/health`
+- Check port 8090 is not blocked by firewall
+
+## Remote Setup
+
+For using on a remote Mac, point to the proxy on your local machine:
 
 ```json
 {
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "proxy-local",
-    "ANTHROPIC_BASE_URL": "http://192.168.1.100:8090",
-    ...
-  }
+    "ANTHROPIC_BASE_URL": "http://YOUR_LOCAL_IP:8090",
+    "ANTHROPIC_MODEL": "minimax-m2.7",
+    "ANTHROPIC_SMALL_FAST_MODEL": "minimax-m2.7",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "minimax-m2.7"
+  },
+  "model": "sonnet"
 }
 ```
-
-## Alternative: Shell Scripts
-
-Instead of changing settings.json, you can use the provided shell scripts:
-
-```bash
-./claude-minimax.sh   # Start Claude Code with MiniMax
-./claude-deepseek.sh  # Start Claude Code with DeepSeek
-```
-
-## Requirements
-
-- Python 3 (stdlib only, no external dependencies)
-- Claude Code CLI
-- API tokens for MiniMax and/or DeepSeek
-
-## License
-
-MIT
