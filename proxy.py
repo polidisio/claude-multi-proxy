@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""
+Multi-Provider Proxy for Claude Code
+Routes model requests to MiniMax or DeepSeek based on model name.
+No external dependencies - uses only stdlib http.client.
+"""
+
+import http.server
+import json
+import threading
+import ssl
+from urllib.parse import urlparse
+
+# Configuration
+MINIMAX_TOKEN = "YOUR_MINIMAX_TOKEN_HERE"
+MINIMAX_BASE_URL = "https://api.minimax.io/anthropic/v1"
+
+DEEPSEEK_TOKEN = "YOUR_DEEPSEEK_TOKEN_HERE"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic/v1"
+
+SERVER_PORT = 8090
+
+# Model mappings
+MODEL_ROUTES = {
+    # MiniMax models
+    "minimax-m2.7": {"provider": "minimax", "model": "MiniMax-M2.7"},
+    "minimax-m2.5": {"provider": "minimax", "model": "MiniMax-M2.5"},
+    "minimax-m2": {"provider": "minimax", "model": "MiniMax-M2"},
+    # DeepSeek models
+    "deepseek-v4-pro": {"provider": "deepseek", "model": "deepseek-chat"},
+    "deepseek-v4-flash": {"provider": "deepseek", "model": "deepseek-chat"},
+    "deepseek-chat": {"provider": "deepseek", "model": "deepseek-chat"},
+    "deepseek-reasoner": {"provider": "deepseek", "model": "deepseek-reasoner"},
+}
+
+# Default provider when model not recognized
+DEFAULT_PROVIDER = "deepseek"
+
+
+class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        print(f"[{self.log_date_time_string()}] {format % args}")
+
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode('utf-8')
+        
+        try:
+            request_data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.send_error_response(400, "Invalid JSON")
+            return
+
+        # Get model from request
+        model = request_data.get('model', DEFAULT_PROVIDER)
+        
+        # Determine target provider and transform model name
+        if model in MODEL_ROUTES:
+            route = MODEL_ROUTES[model]
+            provider = route["provider"]
+            target_model = route["model"]
+        elif "deepseek" in model.lower():
+            provider = "deepseek"
+            target_model = "deepseek-chat"
+        elif "minimax" in model.lower():
+            provider = "minimax"
+            target_model = "MiniMax-M2.7"
+        else:
+            # Default to DeepSeek
+            provider = "deepseek"
+            target_model = "deepseek-chat"
+
+        # Get credentials and base URL
+        if provider == "minimax":
+            token = MINIMAX_TOKEN
+            base_url = MINIMAX_BASE_URL
+        else:
+            token = DEEPSEEK_TOKEN
+            base_url = DEEPSEEK_BASE_URL
+
+        # Update model in request
+        request_data['model'] = target_model
+
+        # Forward request
+        self.proxy_request(base_url, token, request_data)
+
+    def proxy_request(self, base_url, token, request_data):
+        import http.client
+        
+        parsed = urlparse(base_url)
+        conn = http.client.HTTPSConnection(parsed.netloc)
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {token}',
+            'anthropic-version': '2023-06-01'
+        }
+        
+        body = json.dumps(request_data)
+        
+        try:
+            conn.request('POST', f"{parsed.path}/messages", body, headers)
+            response = conn.getresponse()
+            
+            self.send_response(response.status)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            
+            response_body = response.read().decode('utf-8')
+            self.wfile.write(response_body.encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error_response(500, str(e))
+        finally:
+            conn.close()
+
+    def do_GET(self):
+        if self.path == '/v1/models':
+            # Return available models
+            models = {
+                "data": [
+                    {"id": "minimax-m2.7", "display_name": "MiniMax M2.7", "type": "model"},
+                    {"id": "minimax-m2.5", "display_name": "MiniMax M2.5", "type": "model"},
+                    {"id": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro", "type": "model"},
+                    {"id": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash", "type": "model"},
+                    {"id": "deepseek-chat", "display_name": "DeepSeek Chat", "type": "model"},
+                    {"id": "deepseek-reasoner", "display_name": "DeepSeek Reasoner", "type": "model"},
+                ]
+            }
+            self.send_json_response(models)
+        elif self.path == '/health':
+            self.send_json_response({"status": "healthy", "provider": "multi-provider"})
+        else:
+            self.send_error_response(404, "Not Found")
+
+    def send_json_response(self, data):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def send_error_response(self, code, message):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        error = {"error": {"type": "invalid_request", "message": message}}
+        self.wfile.write(json.dumps(error).encode('utf-8'))
+
+
+def run_server(port):
+    server_address = ('0.0.0.0', port)
+    httpd = http.server.HTTPServer(server_address, ProxyHandler)
+    print(f"🚀 Multi-Provider Proxy running on http://127.0.0.1:{port}")
+    print(f"📡 Available models:")
+    print(f"   - minimax-m2.7, minimax-m2.5")
+    print(f"   - deepseek-v4-pro, deepseek-v4-flash, deepseek-chat, deepseek-reasoner")
+    print(f"\nUsage in Claude Code:")
+    print(f"   /model minimax-m2.7    # Use MiniMax")
+    print(f"   /model deepseek-v4-pro  # Use DeepSeek")
+    print(f"\nClaude Code env vars:")
+    print(f"   ANTHROPIC_AUTH_TOKEN=<anything>")
+    print(f"   ANTHROPIC_BASE_URL=http://127.0.0.1:{port}")
+    print(f"   ANTHROPIC_MODEL=<model>")
+    httpd.serve_forever()
+
+
+if __name__ == '__main__':
+    run_server(SERVER_PORT)
