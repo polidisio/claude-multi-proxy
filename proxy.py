@@ -5,10 +5,17 @@ Routes model requests to MiniMax or DeepSeek based on model name.
 Fixes DeepSeek thinking mode by ensuring assistant messages have thinking blocks.
 """
 
+import http.client
 import http.server
 import json
+import logging
 from urllib.parse import urlparse
 import os
+
+# Configuration
+MAX_REQUEST_BYTES = 10 * 1024 * 1024  # 10MB
+PROXY_TIMEOUT_SECONDS = 60
+SERVER_PORT = int(os.environ.get("PROXY_PORT", 8090))
 
 MINIMAX_TOKEN = os.environ.get("MINIMAX_TOKEN", "")
 MINIMAX_BASE_URL = "https://api.minimax.io/anthropic/v1"
@@ -103,16 +110,29 @@ def convert_system_messages(messages):
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        print(f"[{self.log_date_time_string()}] {format % args}")
+        logging.info("%s - %s", self.address_string(), format % args)
 
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0:
+            self.send_error_response(400, "Missing Content-Length")
+            return
+        if content_length > MAX_REQUEST_BYTES:
+            self.send_error_response(413, f"Request too large (max {MAX_REQUEST_BYTES} bytes)")
+            return
         body = self.rfile.read(content_length).decode('utf-8')
         
         try:
             request_data = json.loads(body) if body else {}
         except json.JSONDecodeError:
             self.send_error_response(400, "Invalid JSON")
+            return
+
+        if not isinstance(request_data, dict):
+            self.send_error_response(400, "Request body must be a JSON object")
+            return
+        if not isinstance(request_data.get("messages"), list):
+            self.send_error_response(400, "Field 'messages' must be a list")
             return
 
         model = request_data.get('model', DEFAULT_PROVIDER)
@@ -167,20 +187,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.proxy_request(base_url, token, request_data, provider)
 
     def proxy_request(self, base_url, token, request_data, provider):
-        import http.client
-        
         parsed = urlparse(base_url)
-        conn = http.client.HTTPSConnection(parsed.netloc)
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {token}',
-            'anthropic-version': '2023-06-01'
-        }
-        
-        body = json.dumps(request_data)
-        
+        conn = None
         try:
+            conn = http.client.HTTPSConnection(parsed.netloc, timeout=PROXY_TIMEOUT_SECONDS)
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {token}',
+                'anthropic-version': '2023-06-01'
+            }
+            
+            body = json.dumps(request_data)
+            
             conn.request('POST', f"{parsed.path}/messages", body, headers)
             response = conn.getresponse()
             
@@ -191,10 +210,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             response_body = response.read().decode('utf-8')
             self.wfile.write(response_body.encode('utf-8'))
             
+        except (ConnectionError, TimeoutError, http.client.HTTPException) as e:
+            logging.exception("Upstream error from %s", provider)
+            self.send_error_response(502, "Upstream provider error")
         except Exception as e:
-            self.send_error_response(500, str(e))
+            logging.exception("Unexpected error in proxy_request")
+            self.send_error_response(500, "Internal proxy error")
         finally:
-            conn.close()
+            if conn:
+                conn.close()
 
     def do_GET(self):
         if self.path == '/v1/models':
@@ -229,14 +253,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(error).encode('utf-8'))
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+)
+
+
 def run_server(port):
     server_address = ('0.0.0.0', port)
     httpd = http.server.HTTPServer(server_address, ProxyHandler)
-    print(f"🚀 Multi-Provider Proxy running on http://127.0.0.1:{port}")
-    print(f"📡 Available models:")
-    print(f"   - minimax-m2.7, minimax-m2.5")
-    print(f"   - deepseek-v4-pro, deepseek-v4-flash, deepseek-chat, deepseek-reasoner")
-    httpd.serve_forever()
+    logging.info("Multi-Provider Proxy running on http://127.0.0.1:%s", port)
+    logging.info("Available models: %s", ", ".join(sorted(MODEL_ROUTES.keys())))
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        logging.info("Shutting down")
+        httpd.shutdown()
 
 
 if __name__ == '__main__':
