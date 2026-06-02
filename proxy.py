@@ -10,15 +10,16 @@ import json
 from urllib.parse import urlparse
 import os
 
-MINIMAX_TOKEN = os.environ.get("MINIMAX_TOKEN", "YOUR_MINIMAX_TOKEN")
+MINIMAX_TOKEN = os.environ.get("MINIMAX_TOKEN", "")
 MINIMAX_BASE_URL = "https://api.minimax.io/anthropic/v1"
 
-DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN", "YOUR_DEEPSEEK_TOKEN")
+DEEPSEEK_TOKEN = os.environ.get("DEEPSEEK_TOKEN", "")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic/v1"
 
 SERVER_PORT = 8090
 
 MODEL_ROUTES = {
+    "minimax-m3": {"provider": "minimax", "model": "MiniMax-M3"},
     "minimax-m2.7": {"provider": "minimax", "model": "MiniMax-M2.7"},
     "minimax-m2.5": {"provider": "minimax", "model": "MiniMax-M2.5"},
     "minimax-m2": {"provider": "minimax", "model": "MiniMax-M2"},
@@ -68,6 +69,38 @@ def strip_thinking_from_user_messages(messages):
     return cleaned
 
 
+def convert_system_messages(messages):
+    """DeepSeek doesn't support system role - convert to user message."""
+    system_content = []
+    cleaned = []
+    
+    for msg in messages:
+        if msg.get("role") == "system":
+            # Collect system messages
+            if isinstance(msg.get("content"), str):
+                system_content.append(msg["content"])
+            elif isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        system_content.append(block.get("text", ""))
+        else:
+            cleaned.append(msg)
+    
+    # Prepend system content as user message if any
+    if system_content:
+        system_text = "\n\n".join(system_content)
+        if cleaned and cleaned[0].get("role") == "user":
+            # Merge into first user message
+            first = dict(cleaned[0])
+            if isinstance(first["content"], str):
+                first["content"] = f"[System context]\n{system_text}\n\n[User request]\n{first['content']}"
+            cleaned[0] = first
+        else:
+            cleaned.insert(0, {"role": "user", "content": f"[System context]\n{system_text}"})
+    
+    return cleaned
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -92,8 +125,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             provider = "deepseek"
             target_model = "deepseek-chat"
         elif "minimax" in model.lower():
+            if "m3" in model.lower():
+                target_model = "MiniMax-M3"
+            elif "m2.5" in model.lower():
+                target_model = "MiniMax-M2.5"
+            elif "m2" in model.lower():
+                target_model = "MiniMax-M2"
+            else:
+                target_model = "MiniMax-M3"
             provider = "minimax"
-            target_model = "MiniMax-M2.7"
         else:
             provider = "deepseek"
             target_model = "deepseek-chat"
@@ -106,6 +146,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             base_url = DEEPSEEK_BASE_URL
 
         request_data['model'] = target_model
+
+        # Fix system role issues (DeepSeek and MiniMax don't support system role)
+        if provider in ("deepseek", "minimax") and "messages" in request_data:
+            request_data["messages"] = convert_system_messages(
+                request_data["messages"]
+            )
 
         # Fix thinking mode issues for DeepSeek
         if provider == "deepseek" and "messages" in request_data:
@@ -154,6 +200,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/v1/models':
             models = {
                 "data": [
+                {"id": "minimax-m3", "display_name": "MiniMax M3", "type": "model"},
                     {"id": "minimax-m2.7", "display_name": "MiniMax M2.7", "type": "model"},
                     {"id": "minimax-m2.5", "display_name": "MiniMax M2.5", "type": "model"},
                     {"id": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro", "type": "model"},
